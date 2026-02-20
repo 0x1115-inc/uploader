@@ -71,3 +71,6 @@ curl -v http://localhost:8080/v1/files/<file_id>/download
 ## Notes
 - If you build locally, `go mod tidy` will fetch dependencies and generate `go.sum`.
 - The service enforces a 50MB file limit using a streaming counter and HTTP body limit.
+
+## Deployment
+- DigitalOcean Kubernetes + Spaces guide: `docs/digitalocean-k8s-spaces.md`
