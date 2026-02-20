@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"uploader/internal/db"
 	"uploader/internal/model"
 	"uploader/internal/storage"
-	"uploader/internal/db"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -105,7 +105,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		Filename:    filename,
 		ContentType: contentType,
 		SizeBytes:   counting.n,
-		Bucket:      "stub-bucket",
+		Bucket:      s.cfg.S3Bucket,
 		ObjectKey:   objectKey,
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	}
@@ -186,4 +186,3 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
-

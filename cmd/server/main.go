@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -23,10 +24,22 @@ func main() {
 	}
 	defer func() { _ = sqliteStore.Close() }()
 
+	storageClient, err := newS3WithRetry(storage.S3Config{
+		Endpoint:  cfg.S3Endpoint,
+		AccessKey: cfg.S3AccessKey,
+		SecretKey: cfg.S3SecretKey,
+		Bucket:    cfg.S3Bucket,
+		Region:    cfg.S3Region,
+		UseSSL:    cfg.S3UseSSL,
+	})
+	if err != nil {
+		log.Fatalf("storage init failed: %v", err)
+	}
+
 	srv := httpapi.NewServer(
-		httpapi.Config{MaxUploadMB: cfg.MaxUploadMB},
+		httpapi.Config{MaxUploadMB: cfg.MaxUploadMB, S3Bucket: cfg.S3Bucket},
 		sqliteStore,
-		storage.NewStub(),
+		storageClient,
 	)
 
 	server := &http.Server{
@@ -51,4 +64,21 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
+}
+
+func newS3WithRetry(cfg storage.S3Config) (*storage.S3Provider, error) {
+	var lastErr error
+	for i := 1; i <= 30; i++ {
+		client, err := storage.NewS3(cfg)
+		if err == nil {
+			return client, nil
+		}
+		lastErr = err
+		log.Printf("storage init attempt %d/30 failed: %v", i, err)
+		time.Sleep(2 * time.Second)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("unknown storage init error")
+	}
+	return nil, lastErr
 }

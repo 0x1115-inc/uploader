@@ -11,6 +11,8 @@ services:
       - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/data
+    networks:
+      - app-network
 
   uploader:
     build: .
@@ -29,7 +31,12 @@ services:
       - minio
     volumes:
       - uploader-data:/data
+    networks:
+      - app-network
 
 volumes:
   minio-data:
   uploader-data:
+
+networks:
+  app-network:
