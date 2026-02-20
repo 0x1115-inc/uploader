@@ -99,7 +99,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := uuid.NewString()
-	objectKey := path.Join(id, filename)
+	now := time.Now().UTC()
+	objectKey := path.Join("files", now.Format("2006"), now.Format("01"), id)
 
 	counting := &countingReader{r: limitedFile}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
@@ -124,7 +125,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		SizeBytes:   counting.n,
 		Bucket:      s.cfg.S3Bucket,
 		ObjectKey:   objectKey,
-		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+		CreatedAt:   now.Format(time.RFC3339Nano),
 	}
 	if err := s.db.CreateFile(r.Context(), record); err != nil {
 		logx.Errorf("upload failed: db create error file_id=%s err=%v", id, err)
