@@ -9,6 +9,7 @@ type Config struct {
 	Port        string
 	DBPath      string
 	MaxUploadMB int64
+	LogLevel    string
 
 	S3Endpoint  string
 	S3AccessKey string
@@ -23,6 +24,7 @@ func loadConfig() Config {
 		Port:        getEnv("PORT", "8080"),
 		DBPath:      getEnv("DB_PATH", "./uploader.db"),
 		MaxUploadMB: getEnvInt64("MAX_UPLOAD_MB", 50),
+		LogLevel:    getEnv("LOG_LEVEL", "info"),
 
 		S3Endpoint:  getEnv("S3_ENDPOINT", "minio:9000"),
 		S3AccessKey: getEnv("S3_ACCESS_KEY", "minioadmin"),
@@ -57,4 +59,3 @@ func getEnvBool(key string, def bool) bool {
 	}
 	return def
 }
-

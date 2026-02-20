@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -27,6 +28,7 @@ type S3Config struct {
 type S3Provider struct {
 	client    *s3.Client
 	presigner *s3.PresignClient
+	uploader  *manager.Uploader
 	bucket    string
 }
 
@@ -56,7 +58,12 @@ func NewS3(cfg S3Config) (*S3Provider, error) {
 	})
 	presigner := s3.NewPresignClient(client)
 
-	provider := &S3Provider{client: client, presigner: presigner, bucket: cfg.Bucket}
+	provider := &S3Provider{
+		client:    client,
+		presigner: presigner,
+		uploader:  manager.NewUploader(client),
+		bucket:    cfg.Bucket,
+	}
 	if err := provider.ensureBucket(context.Background(), region); err != nil {
 		return nil, err
 	}
@@ -89,7 +96,7 @@ func (s *S3Provider) Put(ctx context.Context, key string, reader io.Reader, size
 		contentType = "application/octet-stream"
 	}
 
-	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	out, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
 		Body:        reader,

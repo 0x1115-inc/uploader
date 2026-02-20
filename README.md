@@ -37,6 +37,7 @@ Environment variables (defaults shown):
 PORT=8080
 DB_PATH=./uploader.db
 MAX_UPLOAD_MB=50
+LOG_LEVEL=info
 
 S3_ENDPOINT=minio:9000
 S3_ACCESS_KEY=minioadmin

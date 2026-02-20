@@ -13,14 +13,13 @@ import (
 	"time"
 
 	"uploader/internal/db"
+	"uploader/internal/logx"
 	"uploader/internal/model"
 	"uploader/internal/storage"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
-
-var ErrTooLarge = errors.New("file too large")
 
 type Server struct {
 	cfg     Config
@@ -34,6 +33,7 @@ func NewServer(cfg Config, dbConn db.Store, storageClient storage.Provider) *Ser
 
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
+	r.Use(requestLogger)
 	r.Post("/v1/files", s.handleUpload)
 	r.Get("/v1/files/{file_id}/download", s.handleDownload)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -42,11 +42,17 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	maxBytes := s.cfg.MaxUploadMB * 1024 * 1024
-	// Allow a bit of multipart overhead.
+	// HTTP-layer hard cap for the full request (file + multipart overhead).
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+(2*1024*1024))
 
 	mr, err := r.MultipartReader()
 	if err != nil {
+		if isTooLargeErr(err) {
+			logx.Warnf("upload rejected: too large while reading multipart reader")
+			writeError(w, http.StatusRequestEntityTooLarge, "file exceeds max size")
+			return
+		}
+		logx.Warnf("upload rejected: invalid multipart form: %v", err)
 		writeError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
@@ -58,6 +64,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil {
+			if isTooLargeErr(err) {
+				logx.Warnf("upload rejected: too large while reading multipart part")
+				writeError(w, http.StatusRequestEntityTooLarge, "file exceeds max size")
+				return
+			}
+			logx.Warnf("upload rejected: multipart read error: %v", err)
 			writeError(w, http.StatusBadRequest, "invalid multipart form")
 			return
 		}
@@ -72,6 +84,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer filePart.Close()
+	// Per-file cap while streaming the multipart part.
+	limitedFile := http.MaxBytesReader(w, filePart, maxBytes)
+	defer limitedFile.Close()
 
 	filename := sanitizeFilename(filePart.FileName())
 	if filename == "" {
@@ -86,16 +101,18 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	id := uuid.NewString()
 	objectKey := path.Join(id, filename)
 
-	counting := &countingReader{r: filePart, max: maxBytes}
+	counting := &countingReader{r: limitedFile}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
 
 	_, err = s.storage.Put(ctx, objectKey, counting, -1, contentType)
 	if err != nil {
-		if errors.Is(err, ErrTooLarge) || strings.Contains(err.Error(), "entity too large") {
+		if isTooLargeErr(err) {
+			logx.Warnf("upload rejected: too large file_id=%s filename=%q", id, filename)
 			writeError(w, http.StatusRequestEntityTooLarge, "file exceeds max size")
 			return
 		}
+		logx.Errorf("upload failed: storage put error file_id=%s object_key=%q err=%v", id, objectKey, err)
 		writeError(w, http.StatusInternalServerError, "upload failed")
 		return
 	}
@@ -110,6 +127,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if err := s.db.CreateFile(r.Context(), record); err != nil {
+		logx.Errorf("upload failed: db create error file_id=%s err=%v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to persist metadata")
 		return
 	}
@@ -133,15 +151,18 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	file, err := s.db.GetFile(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			logx.Warnf("download miss: file_id=%s not found", id)
 			writeError(w, http.StatusNotFound, "file not found")
 			return
 		}
+		logx.Errorf("download failed: db get error file_id=%s err=%v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to fetch metadata")
 		return
 	}
 
 	url, err := s.storage.GetSignedURL(r.Context(), file.ObjectKey, 60*time.Second)
 	if err != nil {
+		logx.Errorf("download failed: sign url error file_id=%s object_key=%q err=%v", id, file.ObjectKey, err)
 		writeError(w, http.StatusInternalServerError, "failed to sign url")
 		return
 	}
@@ -171,18 +192,41 @@ func sanitizeFilename(name string) string {
 }
 
 type countingReader struct {
-	r   io.Reader
-	n   int64
-	max int64
+	r io.Reader
+	n int64
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	if n > 0 {
 		c.n += int64(n)
-		if c.n > c.max {
-			return n, ErrTooLarge
-		}
 	}
 	return n, err
+}
+
+func isTooLargeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr) || strings.Contains(err.Error(), "entity too large")
+}
+
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		logx.Infof("%s %s status=%d duration=%s", r.Method, r.URL.Path, rec.status, time.Since(start))
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,15 +11,19 @@ import (
 
 	"uploader/internal/db"
 	httpapi "uploader/internal/http"
+	"uploader/internal/logx"
 	"uploader/internal/storage"
 )
 
 func main() {
 	cfg := loadConfig()
+	logx.SetLevelFromString(cfg.LogLevel)
+	logx.Infof("log level set to %s", cfg.LogLevel)
 
 	sqliteStore, err := db.NewSQLite(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("db init failed: %v", err)
+		logx.Errorf("db init failed: %v", err)
+		os.Exit(1)
 	}
 	defer func() { _ = sqliteStore.Close() }()
 
@@ -33,7 +36,8 @@ func main() {
 		UseSSL:    cfg.S3UseSSL,
 	})
 	if err != nil {
-		log.Fatalf("storage init failed: %v", err)
+		logx.Errorf("storage init failed: %v", err)
+		os.Exit(1)
 	}
 
 	srv := httpapi.NewServer(
@@ -49,9 +53,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("uploader listening on :%s", cfg.Port)
+		logx.Infof("uploader listening on :%s", cfg.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server failed: %v", err)
+			logx.Errorf("server failed: %v", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -62,7 +67,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown error: %v", err)
+		logx.Warnf("shutdown error: %v", err)
 	}
 }
 
@@ -74,7 +79,7 @@ func newS3WithRetry(cfg storage.S3Config) (*storage.S3Provider, error) {
 			return client, nil
 		}
 		lastErr = err
-		log.Printf("storage init attempt %d/30 failed: %v", i, err)
+		logx.Warnf("storage init attempt %d/30 failed: %v", i, err)
 		time.Sleep(2 * time.Second)
 	}
 	if lastErr == nil {
