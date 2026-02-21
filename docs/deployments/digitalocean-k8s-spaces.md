@@ -18,8 +18,12 @@ This guide deploys `uploader` to DigitalOcean Kubernetes (DOKS), stores files in
 ## 1) Build and push
 
 ```bash
-docker build -t registry.example.com/uploader:v1.0.0 .
-docker push registry.example.com/uploader:v1.0.0
+TAG=v1.0.0
+docker build -t registry.example.com/uploader:${TAG} \ 
+ -t registry.example.com/uploader:latest \ 
+ --platform linux/amd64,linux/arm64 .
+docker push registry.example.com/uploader:${TAG}
+docker push registry.example.com/uploader:latest
 ```
 
 ## 2) Create namespace and secrets
