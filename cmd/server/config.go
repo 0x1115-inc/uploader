@@ -8,6 +8,7 @@ import (
 type Config struct {
 	Port        string
 	DBPath      string
+	DatabaseURL string
 	MaxUploadMB int64
 	LogLevel    string
 
@@ -23,6 +24,7 @@ func loadConfig() Config {
 	return Config{
 		Port:        getEnv("PORT", "8080"),
 		DBPath:      getEnv("DB_PATH", "./uploader.db"),
+		DatabaseURL: getEnv("DATABASE_URL", ""),
 		MaxUploadMB: getEnvInt64("MAX_UPLOAD_MB", 50),
 		LogLevel:    getEnv("LOG_LEVEL", "info"),
 

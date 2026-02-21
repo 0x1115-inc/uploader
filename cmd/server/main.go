@@ -20,12 +20,12 @@ func main() {
 	logx.SetLevelFromString(cfg.LogLevel)
 	logx.Infof("log level set to %s", cfg.LogLevel)
 
-	sqliteStore, err := db.NewSQLite(cfg.DBPath)
+	dbStore, closeDB, err := newDBStore(cfg)
 	if err != nil {
 		logx.Errorf("db init failed: %v", err)
 		os.Exit(1)
 	}
-	defer func() { _ = sqliteStore.Close() }()
+	defer closeDB()
 
 	storageClient, err := newS3WithRetry(storage.S3Config{
 		Endpoint:  cfg.S3Endpoint,
@@ -42,7 +42,7 @@ func main() {
 
 	srv := httpapi.NewServer(
 		httpapi.Config{MaxUploadMB: cfg.MaxUploadMB, S3Bucket: cfg.S3Bucket},
-		sqliteStore,
+		dbStore,
 		storageClient,
 	)
 
@@ -69,6 +69,24 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logx.Warnf("shutdown error: %v", err)
 	}
+}
+
+func newDBStore(cfg Config) (db.Store, func(), error) {
+	if cfg.DatabaseURL != "" {
+		logx.Infof("using postgres database")
+		pgStore, err := db.NewPostgres(cfg.DatabaseURL)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return pgStore, func() { _ = pgStore.Close() }, nil
+	}
+
+	logx.Infof("using sqlite database path=%s", cfg.DBPath)
+	sqliteStore, err := db.NewSQLite(cfg.DBPath)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return sqliteStore, func() { _ = sqliteStore.Close() }, nil
 }
 
 func newS3WithRetry(cfg storage.S3Config) (*storage.S3Provider, error) {

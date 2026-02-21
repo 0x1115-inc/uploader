@@ -1,13 +1,13 @@
-# Uploader v1.0.0
+# Uploader v1.0
 
-Minimal file upload microservice with S3/MinIO storage and SQLite metadata.
+Minimal file upload microservice with S3/MinIO-compatible storage and SQL metadata.
 
 ## Features
 - No auth, no checksum
 - Max upload size: 50MB (configurable)
 - Streaming multipart upload (no full in-memory buffering)
 - S3/MinIO storage via `StorageProvider`
-- SQLite metadata in a single `files` table
+- Metadata in a single `files` table (Postgres in production, SQLite fallback for local/dev)
 
 ## Endpoints
 - `POST /v1/files` multipart upload (field `file`)
@@ -36,6 +36,7 @@ Environment variables (defaults shown):
 ```bash
 PORT=8080
 DB_PATH=./uploader.db
+DATABASE_URL=
 MAX_UPLOAD_MB=50
 LOG_LEVEL=info
 
@@ -71,6 +72,8 @@ curl -v http://localhost:8080/v1/files/<file_id>/download
 ## Notes
 - If you build locally, `go mod tidy` will fetch dependencies and generate `go.sum`.
 - The service enforces a 50MB file limit using a streaming counter and HTTP body limit.
+- `DATABASE_URL` set: uses Postgres.
+- `DATABASE_URL` empty: uses SQLite at `DB_PATH`.
 
 ## Deployment
 - DigitalOcean Kubernetes + Spaces guide: `docs/digitalocean-k8s-spaces.md`
