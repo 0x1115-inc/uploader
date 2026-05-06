@@ -37,7 +37,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
+
+const filePasswordHeader = "X-File-Password"
 
 type Server struct {
 	cfg     Config
@@ -59,6 +62,8 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	password := r.Header.Get(filePasswordHeader)
+
 	maxBytes := s.cfg.MaxUploadMB * 1024 * 1024
 	// HTTP-layer hard cap for the full request (file + multipart overhead).
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+(2*1024*1024))
@@ -116,6 +121,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 
+	passwordHash := ""
+	if strings.TrimSpace(password) != "" {
+		passwordHash, err = hashPassword(password)
+		if err != nil {
+			logx.Errorf("upload failed: password hash error: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to secure file")
+			return
+		}
+	}
+
 	id := uuid.NewString()
 	now := time.Now().UTC()
 	objectKey := path.Join("files", now.Format("2006"), now.Format("01"), id)
@@ -137,13 +152,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	record := model.FileRecord{
-		ID:          id,
-		Filename:    filename,
-		ContentType: contentType,
-		SizeBytes:   counting.n,
-		Bucket:      s.cfg.S3Bucket,
-		ObjectKey:   objectKey,
-		CreatedAt:   now.Format(time.RFC3339Nano),
+		ID:           id,
+		Filename:     filename,
+		ContentType:  contentType,
+		SizeBytes:    counting.n,
+		Bucket:       s.cfg.S3Bucket,
+		ObjectKey:    objectKey,
+		PasswordHash: passwordHash,
+		CreatedAt:    now.Format(time.RFC3339Nano),
 	}
 	if err := s.db.CreateFile(r.Context(), record); err != nil {
 		logx.Errorf("upload failed: db create error file_id=%s err=%v", id, err)
@@ -166,6 +182,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "file_id is required")
 		return
 	}
+	password := r.Header.Get(filePasswordHeader)
 
 	file, err := s.db.GetFile(r.Context(), id)
 	if err != nil {
@@ -177,6 +194,18 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		logx.Errorf("download failed: db get error file_id=%s err=%v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to fetch metadata")
 		return
+	}
+
+	if file.PasswordHash != "" {
+		if strings.TrimSpace(password) == "" {
+			writeError(w, http.StatusUnauthorized, "password is required")
+			return
+		}
+		if err := comparePassword(file.PasswordHash, password); err != nil {
+			logx.Warnf("download rejected: invalid password file_id=%s", id)
+			writeError(w, http.StatusUnauthorized, "invalid password")
+			return
+		}
 	}
 
 	url, err := s.storage.GetSignedURL(r.Context(), file.ObjectKey, 60*time.Second)
@@ -208,6 +237,18 @@ func sanitizeFilename(name string) string {
 		return ""
 	}
 	return name
+}
+
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+func comparePassword(hash, password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
 type countingReader struct {

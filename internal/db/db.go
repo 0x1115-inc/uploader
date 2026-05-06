@@ -22,6 +22,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"uploader/internal/model"
@@ -71,28 +72,36 @@ CREATE TABLE IF NOT EXISTS files (
 	size_bytes INTEGER NOT NULL,
 	bucket TEXT NOT NULL,
 	object_key TEXT NOT NULL,
+	password_hash TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at DESC);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE files ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 func (s *SQLiteStore) CreateFile(ctx context.Context, f model.FileRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO files (id, filename, content_type, size_bytes, bucket, object_key, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`, f.ID, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.CreatedAt)
+INSERT INTO files (id, filename, content_type, size_bytes, bucket, object_key, password_hash, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, f.ID, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.PasswordHash, f.CreatedAt)
 	return err
 }
 
 func (s *SQLiteStore) GetFile(ctx context.Context, id string) (model.FileRecord, error) {
 	var f model.FileRecord
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, filename, content_type, size_bytes, bucket, object_key, created_at
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, created_at
 FROM files
 WHERE id = ?
-`, id).Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.CreatedAt)
+`, id).Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.CreatedAt)
 	if err != nil {
 		return model.FileRecord{}, err
 	}
@@ -108,7 +117,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, limit, offset int) ([]model
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, filename, content_type, size_bytes, bucket, object_key, created_at
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, created_at
 FROM files
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?
@@ -121,7 +130,7 @@ LIMIT ? OFFSET ?
 	files := make([]model.FileRecord, 0, limit)
 	for rows.Next() {
 		var f model.FileRecord
-		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.CreatedAt); err != nil {
 			return nil, err
 		}
 		files = append(files, f)
@@ -135,9 +144,9 @@ LIMIT ? OFFSET ?
 func (s *SQLiteStore) UpdateFile(ctx context.Context, f model.FileRecord) error {
 	res, err := s.db.ExecContext(ctx, `
 UPDATE files
-SET filename = ?, content_type = ?, size_bytes = ?, bucket = ?, object_key = ?
+SET filename = ?, content_type = ?, size_bytes = ?, bucket = ?, object_key = ?, password_hash = ?
 WHERE id = ?
-`, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.ID)
+`, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.PasswordHash, f.ID)
 	if err != nil {
 		return err
 	}

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Uploader API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     OpenAPI specification for the uploader service.
 
@@ -24,9 +24,15 @@ paths:
       description: |
         Streams a multipart file upload using the `file` form field.
 
+        A password may be supplied in the `X-File-Password` header.
+        When supplied, it is stored as a hash and must be presented again to
+        download that protected file.
+
         The service enforces a configurable maximum upload size.
         By default, uploads larger than 50 MB are rejected.
       operationId: uploadFile
+      parameters:
+        - $ref: '#/components/parameters/FilePasswordHeader'
       requestBody:
         required: true
         content:
@@ -91,6 +97,9 @@ paths:
                 persistFailed:
                   value:
                     error: failed to persist metadata
+                secureFileFailed:
+                  value:
+                    error: failed to secure file
   /v1/files/{file_id}/download:
     get:
       tags:
@@ -99,6 +108,10 @@ paths:
       description: |
         Looks up the uploaded file by identifier and returns an HTTP `302`
         redirect to a signed object storage URL.
+
+        For password-protected files, clients must present the same
+        `X-File-Password` header used during upload.
+        For files uploaded without a password, no password is required.
 
         The signed URL currently has a 60-second time-to-live.
       operationId: downloadFile
@@ -109,6 +122,7 @@ paths:
           description: Unique file identifier returned by the upload endpoint.
           schema:
             type: string
+        - $ref: '#/components/parameters/FilePasswordHeader'
       responses:
         '302':
           description: Redirect to a signed download URL
@@ -126,6 +140,19 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: file_id is required
+        '401':
+          description: Password missing or invalid for a protected file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingPassword:
+                  value:
+                    error: password is required
+                invalidPassword:
+                  value:
+                    error: invalid password
         '404':
           description: File metadata not found
           content:
@@ -158,6 +185,15 @@ paths:
         '200':
           description: Service is healthy
 components:
+  parameters:
+    FilePasswordHeader:
+      name: X-File-Password
+      in: header
+      required: false
+      description: Optional file password. Required for download only when the file is protected.
+      schema:
+        type: string
+        minLength: 1
   schemas:
     FileUploadResponse:
       type: object

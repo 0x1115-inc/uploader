@@ -62,28 +62,30 @@ CREATE TABLE IF NOT EXISTS files (
 	size_bytes BIGINT NOT NULL,
 	bucket TEXT NOT NULL,
 	object_key TEXT NOT NULL,
+	password_hash TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at DESC);
+ALTER TABLE files ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT '';
 `)
 	return err
 }
 
 func (s *PostgresStore) CreateFile(ctx context.Context, f model.FileRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO files (id, filename, content_type, size_bytes, bucket, object_key, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-`, f.ID, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.CreatedAt)
+INSERT INTO files (id, filename, content_type, size_bytes, bucket, object_key, password_hash, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+`, f.ID, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.PasswordHash, f.CreatedAt)
 	return err
 }
 
 func (s *PostgresStore) GetFile(ctx context.Context, id string) (model.FileRecord, error) {
 	var f model.FileRecord
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, filename, content_type, size_bytes, bucket, object_key, created_at
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, created_at
 FROM files
 WHERE id = $1
-`, id).Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.CreatedAt)
+`, id).Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.CreatedAt)
 	if err != nil {
 		return model.FileRecord{}, err
 	}
@@ -99,7 +101,7 @@ func (s *PostgresStore) ListFiles(ctx context.Context, limit, offset int) ([]mod
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, filename, content_type, size_bytes, bucket, object_key, created_at
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, created_at
 FROM files
 ORDER BY created_at DESC
 LIMIT $1 OFFSET $2
@@ -112,7 +114,7 @@ LIMIT $1 OFFSET $2
 	files := make([]model.FileRecord, 0, limit)
 	for rows.Next() {
 		var f model.FileRecord
-		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.CreatedAt); err != nil {
 			return nil, err
 		}
 		files = append(files, f)
@@ -126,9 +128,9 @@ LIMIT $1 OFFSET $2
 func (s *PostgresStore) UpdateFile(ctx context.Context, f model.FileRecord) error {
 	res, err := s.db.ExecContext(ctx, `
 UPDATE files
-SET filename = $1, content_type = $2, size_bytes = $3, bucket = $4, object_key = $5
-WHERE id = $6
-`, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.ID)
+SET filename = $1, content_type = $2, size_bytes = $3, bucket = $4, object_key = $5, password_hash = $6
+WHERE id = $7
+`, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.PasswordHash, f.ID)
 	if err != nil {
 		return err
 	}

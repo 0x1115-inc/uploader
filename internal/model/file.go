@@ -19,11 +19,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package model
 
 type FileRecord struct {
-	ID          string
-	Filename    string
-	ContentType string
-	SizeBytes   int64
-	Bucket      string
-	ObjectKey   string
-	CreatedAt   string
+	ID           string
+	Filename     string
+	ContentType  string
+	SizeBytes    int64
+	Bucket       string
+	ObjectKey    string
+	PasswordHash string
+	CreatedAt    string
 }
