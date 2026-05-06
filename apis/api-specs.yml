@@ -1,0 +1,195 @@
+openapi: 3.0.3
+info:
+  title: Uploader API
+  version: 1.0.0
+  description: |
+    OpenAPI specification for the uploader service.
+
+    The service accepts multipart file uploads, stores file metadata,
+    and returns a short-lived signed download redirect.
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+tags:
+  - name: Files
+    description: File upload and download operations
+  - name: Health
+    description: Service health endpoint
+paths:
+  /v1/files:
+    post:
+      tags:
+        - Files
+      summary: Upload a file
+      description: |
+        Streams a multipart file upload using the `file` form field.
+
+        The service enforces a configurable maximum upload size.
+        By default, uploads larger than 50 MB are rejected.
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: File content to upload.
+      responses:
+        '201':
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileUploadResponse'
+              examples:
+                uploaded:
+                  value:
+                    file_id: 550e8400-e29b-41d4-a716-446655440000
+                    filename: file.pdf
+                    content_type: application/pdf
+                    size_bytes: 12345
+        '400':
+          description: Invalid multipart form data or missing file metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidMultipart:
+                  value:
+                    error: invalid multipart form
+                missingFile:
+                  value:
+                    error: missing file field
+                missingFilename:
+                  value:
+                    error: file name is required
+        '413':
+          description: Uploaded file exceeds the configured maximum size
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file exceeds max size
+        '500':
+          description: Upload or metadata persistence failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                uploadFailed:
+                  value:
+                    error: upload failed
+                persistFailed:
+                  value:
+                    error: failed to persist metadata
+  /v1/files/{file_id}/download:
+    get:
+      tags:
+        - Files
+      summary: Get a signed download redirect
+      description: |
+        Looks up the uploaded file by identifier and returns an HTTP `302`
+        redirect to a signed object storage URL.
+
+        The signed URL currently has a 60-second time-to-live.
+      operationId: downloadFile
+      parameters:
+        - name: file_id
+          in: path
+          required: true
+          description: Unique file identifier returned by the upload endpoint.
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to a signed download URL
+          headers:
+            Location:
+              description: Signed object storage URL for downloading the file.
+              schema:
+                type: string
+                format: uri
+        '400':
+          description: Missing file identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file_id is required
+        '404':
+          description: File metadata not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file not found
+        '500':
+          description: Metadata lookup or URL signing failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                metadataFetchFailed:
+                  value:
+                    error: failed to fetch metadata
+                signFailed:
+                  value:
+                    error: failed to sign url
+  /healthz:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Returns success when the HTTP service is up.
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+components:
+  schemas:
+    FileUploadResponse:
+      type: object
+      required:
+        - file_id
+        - filename
+        - content_type
+        - size_bytes
+      properties:
+        file_id:
+          type: string
+          description: Server-generated file identifier.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        filename:
+          type: string
+          description: Sanitized original file name.
+          example: file.pdf
+        content_type:
+          type: string
+          description: Media type associated with the uploaded file.
+          example: application/pdf
+        size_bytes:
+          type: integer
+          format: int64
+          description: Number of bytes streamed for the uploaded file.
+          example: 12345
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+          example: invalid multipart form
