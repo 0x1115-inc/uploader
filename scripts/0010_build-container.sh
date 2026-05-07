@@ -28,4 +28,5 @@ IMAGE_TAG="${VERSION}"
 
 docker build -t ${CONTAINER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
  -t ${CONTAINER_REGISTRY}/${IMAGE_NAME}:latest \
- --platform linux/amd64,linux/arm64 .
+ --platform linux/amd64,linux/arm64 \
+ -f build/Dockerfile .
