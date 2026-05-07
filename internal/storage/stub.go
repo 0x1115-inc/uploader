@@ -39,3 +39,7 @@ func (s *Stub) Put(ctx context.Context, key string, reader io.Reader, size int64
 func (s *Stub) GetSignedURL(ctx context.Context, key string, ttl time.Duration) (string, error) {
 	return fmt.Sprintf("https://example.com/download/%s?ttl=%ds", key, int(ttl.Seconds())), nil
 }
+
+func (s *Stub) Delete(ctx context.Context, key string) error {
+	return nil
+}

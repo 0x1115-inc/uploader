@@ -141,4 +141,12 @@ func (s *S3Provider) GetSignedURL(ctx context.Context, key string, ttl time.Dura
 	return out.URL, nil
 }
 
+func (s *S3Provider) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	return err
+}
+
 var _ Provider = (*S3Provider)(nil)

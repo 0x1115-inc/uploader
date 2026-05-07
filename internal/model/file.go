@@ -26,5 +26,6 @@ type FileRecord struct {
 	Bucket       string
 	ObjectKey    string
 	PasswordHash string
+	ExpiresAt    string
 	CreatedAt    string
 }

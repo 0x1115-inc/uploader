@@ -41,6 +41,7 @@ import (
 )
 
 const filePasswordHeader = "X-File-Password"
+const fileExpiresAtHeader = "X-File-Expires-At"
 
 type Server struct {
 	cfg     Config
@@ -63,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	password := r.Header.Get(filePasswordHeader)
+	expiresAtHeader := strings.TrimSpace(r.Header.Get(fileExpiresAtHeader))
 
 	maxBytes := s.cfg.MaxUploadMB * 1024 * 1024
 	// HTTP-layer hard cap for the full request (file + multipart overhead).
@@ -131,8 +133,17 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	expiresAt := ""
+	if expiresAtHeader != "" {
+		expiresAt, err = parseAndValidateExpiration(expiresAtHeader, nowUTC)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	id := uuid.NewString()
-	now := time.Now().UTC()
+	now := nowUTC()
 	objectKey := path.Join("files", now.Format("2006"), now.Format("01"), id)
 
 	counting := &countingReader{r: limitedFile}
@@ -159,6 +170,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		Bucket:       s.cfg.S3Bucket,
 		ObjectKey:    objectKey,
 		PasswordHash: passwordHash,
+		ExpiresAt:    expiresAt,
 		CreatedAt:    now.Format(time.RFC3339Nano),
 	}
 	if err := s.db.CreateFile(r.Context(), record); err != nil {
@@ -172,6 +184,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"filename":     record.Filename,
 		"content_type": record.ContentType,
 		"size_bytes":   record.SizeBytes,
+	}
+	if record.ExpiresAt != "" {
+		resp["expires_at"] = record.ExpiresAt
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -208,6 +223,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if isExpired(file.ExpiresAt) {
+		s.cleanupExpiredFile(r.Context(), file)
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+
 	url, err := s.storage.GetSignedURL(r.Context(), file.ObjectKey, 60*time.Second)
 	if err != nil {
 		logx.Errorf("download failed: sign url error file_id=%s object_key=%q err=%v", id, file.ObjectKey, err)
@@ -217,6 +238,19 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", url)
 	w.WriteHeader(http.StatusFound)
+}
+
+func (s *Server) cleanupExpiredFile(ctx context.Context, file model.FileRecord) {
+	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if err := s.storage.Delete(cleanupCtx, file.ObjectKey); err != nil {
+		logx.Warnf("expired file cleanup: storage delete failed file_id=%s object_key=%q err=%v", file.ID, file.ObjectKey, err)
+	}
+
+	if err := s.db.DeleteFile(cleanupCtx, file.ID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		logx.Warnf("expired file cleanup: metadata delete failed file_id=%s err=%v", file.ID, err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
@@ -249,6 +283,35 @@ func hashPassword(password string) (string, error) {
 
 func comparePassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+
+func parseAndValidateExpiration(raw string, nowFn func() time.Time) (string, error) {
+	expiresAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return "", errors.New("invalid expiration; use RFC3339 timestamp")
+	}
+
+	expiresAt = expiresAt.UTC()
+	if !expiresAt.After(nowFn()) {
+		return "", errors.New("expiration must be in the future")
+	}
+
+	return expiresAt.Format(time.RFC3339Nano), nil
+}
+
+func isExpired(expiresAt string) bool {
+	if strings.TrimSpace(expiresAt) == "" {
+		return false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil {
+		return false
+	}
+	return !nowUTC().Before(parsed)
+}
+
+var nowUTC = func() time.Time {
+	return time.Now().UTC()
 }
 
 type countingReader struct {

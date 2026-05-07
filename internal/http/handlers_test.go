@@ -16,7 +16,7 @@ import (
 )
 
 func TestUploadWithoutPasswordAllowed(t *testing.T) {
-	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, newStubStore(), stubStorage{})
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, newStubStore(), &stubStorage{})
 	body, contentType := newMultipartUpload(t, "hello.txt", "hello world")
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", body)
 	req.Header.Set("Content-Type", contentType)
@@ -31,7 +31,7 @@ func TestUploadWithoutPasswordAllowed(t *testing.T) {
 
 func TestDownloadRequiresMatchingPassword(t *testing.T) {
 	store := newStubStore()
-	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, stubStorage{})
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, &stubStorage{})
 	body, contentType := newMultipartUpload(t, "hello.txt", "hello world")
 	uploadReq := httptest.NewRequest(http.MethodPost, "/v1/files", body)
 	uploadReq.Header.Set("Content-Type", contentType)
@@ -91,7 +91,7 @@ func TestDownloadWithoutStoredPasswordAllowsAccess(t *testing.T) {
 		ID:        "legacy-file",
 		ObjectKey: "files/2026/05/legacy-file",
 	}
-	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, stubStorage{})
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, &stubStorage{})
 	req := httptest.NewRequest(http.MethodGet, "/v1/files/legacy-file/download", nil)
 
 	resp := httptest.NewRecorder()
@@ -99,6 +99,83 @@ func TestDownloadWithoutStoredPasswordAllowsAccess(t *testing.T) {
 
 	if resp.Code != http.StatusFound {
 		t.Fatalf("expected status %d, got %d", http.StatusFound, resp.Code)
+	}
+}
+
+func TestUploadWithExpirationHeader(t *testing.T) {
+	store := newStubStore()
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, &stubStorage{})
+	body, contentType := newMultipartUpload(t, "hello.txt", "hello world")
+	req := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	req.Header.Set("Content-Type", contentType)
+	expiresAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	req.Header.Set(fileExpiresAtHeader, expiresAt)
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, resp.Code, resp.Body.String())
+	}
+
+	var created struct {
+		FileID    string `json:"file_id"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal upload response: %v", err)
+	}
+	if created.ExpiresAt == "" {
+		t.Fatal("expected expires_at in upload response")
+	}
+
+	rec, err := store.GetFile(context.Background(), created.FileID)
+	if err != nil {
+		t.Fatalf("get stored file: %v", err)
+	}
+	if rec.ExpiresAt == "" {
+		t.Fatal("expected expires_at to be persisted")
+	}
+}
+
+func TestUploadWithInvalidExpirationHeaderRejected(t *testing.T) {
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, newStubStore(), &stubStorage{})
+	body, contentType := newMultipartUpload(t, "hello.txt", "hello world")
+	req := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set(fileExpiresAtHeader, "not-a-timestamp")
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, resp.Code)
+	}
+}
+
+func TestDownloadExpiredFileReturnsNotFoundAndCleansUp(t *testing.T) {
+	store := newStubStore()
+	storage := &stubStorage{}
+	store.files["expired-file"] = model.FileRecord{
+		ID:        "expired-file",
+		ObjectKey: "files/2026/05/expired-file",
+		ExpiresAt: time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339Nano),
+	}
+
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, storage)
+	req := httptest.NewRequest(http.MethodGet, "/v1/files/expired-file/download", nil)
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, resp.Code)
+	}
+	if _, err := store.GetFile(context.Background(), "expired-file"); err != sql.ErrNoRows {
+		t.Fatalf("expected metadata deleted, got err=%v", err)
+	}
+	if len(storage.deletedKeys) != 1 || storage.deletedKeys[0] != "files/2026/05/expired-file" {
+		t.Fatalf("expected object cleanup, got %+v", storage.deletedKeys)
 	}
 }
 
@@ -148,17 +225,25 @@ func (s *stubStore) UpdateFile(_ context.Context, _ model.FileRecord) error {
 	return nil
 }
 
-func (s *stubStore) DeleteFile(_ context.Context, _ string) error {
+func (s *stubStore) DeleteFile(_ context.Context, id string) error {
+	delete(s.files, id)
 	return nil
 }
 
-type stubStorage struct{}
+type stubStorage struct {
+	deletedKeys []string
+}
 
-func (stubStorage) Put(_ context.Context, _ string, reader io.Reader, _ int64, _ string) (string, error) {
+func (s *stubStorage) Put(_ context.Context, _ string, reader io.Reader, _ int64, _ string) (string, error) {
 	_, err := io.Copy(io.Discard, reader)
 	return "etag", err
 }
 
-func (stubStorage) GetSignedURL(_ context.Context, key string, ttl time.Duration) (string, error) {
+func (s *stubStorage) GetSignedURL(_ context.Context, key string, ttl time.Duration) (string, error) {
 	return "https://example.test/download/" + key + "?ttl=" + ttl.String(), nil
+}
+
+func (s *stubStorage) Delete(_ context.Context, key string) error {
+	s.deletedKeys = append(s.deletedKeys, key)
+	return nil
 }

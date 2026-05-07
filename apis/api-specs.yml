@@ -28,11 +28,17 @@ paths:
         When supplied, it is stored as a hash and must be presented again to
         download that protected file.
 
+        An optional expiration timestamp may be supplied in the
+        `X-File-Expires-At` header using RFC3339 format (UTC recommended).
+        After expiration, downloads are denied and the system may remove the
+        object and metadata during cleanup.
+
         The service enforces a configurable maximum upload size.
         By default, uploads larger than 50 MB are rejected.
       operationId: uploadFile
       parameters:
         - $ref: '#/components/parameters/FilePasswordHeader'
+        - $ref: '#/components/parameters/FileExpiresAtHeader'
       requestBody:
         required: true
         content:
@@ -76,6 +82,12 @@ paths:
                 missingFilename:
                   value:
                     error: file name is required
+                invalidExpiration:
+                  value:
+                    error: invalid expiration; use RFC3339 timestamp
+                pastExpiration:
+                  value:
+                    error: expiration must be in the future
         '413':
           description: Uploaded file exceeds the configured maximum size
           content:
@@ -194,6 +206,14 @@ components:
       schema:
         type: string
         minLength: 1
+    FileExpiresAtHeader:
+      name: X-File-Expires-At
+      in: header
+      required: false
+      description: Optional RFC3339 timestamp after which the file is no longer downloadable.
+      schema:
+        type: string
+        format: date-time
   schemas:
     FileUploadResponse:
       type: object
@@ -220,6 +240,11 @@ components:
           format: int64
           description: Number of bytes streamed for the uploaded file.
           example: 12345
+        expires_at:
+          type: string
+          format: date-time
+          description: Optional RFC3339 expiration timestamp when provided at upload time.
+          example: 2026-05-07T16:30:00Z
     ErrorResponse:
       type: object
       required:
