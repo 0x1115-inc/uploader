@@ -24,21 +24,18 @@ paths:
       description: |
         Streams a multipart file upload using the `file` form field.
 
-        A password may be supplied in the `X-File-Password` header.
+        A password may be supplied in the `password` multipart form field.
         When supplied, it is stored as a hash and must be presented again to
         download that protected file.
 
         An optional expiration timestamp may be supplied in the
-        `X-File-Expires-At` header using RFC3339 format (UTC recommended).
+        `expires_at` multipart form field using RFC3339 format (UTC recommended).
         After expiration, downloads are denied and the system may remove the
         object and metadata during cleanup.
 
         The service enforces a configurable maximum upload size.
         By default, uploads larger than 50 MB are rejected.
       operationId: uploadFile
-      parameters:
-        - $ref: '#/components/parameters/FilePasswordHeader'
-        - $ref: '#/components/parameters/FileExpiresAtHeader'
       requestBody:
         required: true
         content:
@@ -52,6 +49,14 @@ paths:
                   type: string
                   format: binary
                   description: File content to upload.
+                password:
+                  type: string
+                  minLength: 1
+                  description: Optional password used to protect downloads for the uploaded file.
+                expires_at:
+                  type: string
+                  format: date-time
+                  description: Optional RFC3339 timestamp after which the file is no longer downloadable.
       responses:
         '201':
           description: File uploaded successfully
@@ -121,8 +126,75 @@ paths:
         Looks up the uploaded file by identifier and returns an HTTP `302`
         redirect to a signed object storage URL.
 
-        For password-protected files, clients must present the same
-        `X-File-Password` header used during upload.
+        This endpoint works for files without a password.
+        For password-protected files, use the `POST` variant of this endpoint
+        and send the password in the request body.
+
+        The signed URL currently has a 60-second time-to-live.
+      operationId: downloadFile
+      parameters:
+        - name: file_id
+          in: path
+          required: true
+          description: Unique file identifier returned by the upload endpoint.
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to a signed download URL
+          headers:
+            Location:
+              description: Signed object storage URL for downloading the file.
+              schema:
+                type: string
+                format: uri
+        '400':
+          description: Missing file identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file_id is required
+        '401':
+          description: Password required for a protected file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: password is required
+        '404':
+          description: File metadata not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file not found
+        '500':
+          description: Metadata lookup or URL signing failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                metadataFetchFailed:
+                  value:
+                    error: failed to fetch metadata
+                signFailed:
+                  value:
+                    error: failed to sign url
+    post:
+      tags:
+        - Files
+      summary: Get a signed download redirect for a protected file
+      description: |
+        Looks up the uploaded file by identifier and returns an HTTP `302`
+        redirect to a signed object storage URL.
+
+        For password-protected files, clients must send the same password used
+        during upload in the request body.
         For files uploaded without a password, no password is required.
 
         The signed URL currently has a 60-second time-to-live.
@@ -134,7 +206,18 @@ paths:
           description: Unique file identifier returned by the upload endpoint.
           schema:
             type: string
-        - $ref: '#/components/parameters/FilePasswordHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DownloadPasswordRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/DownloadPasswordRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DownloadPasswordRequest'
       responses:
         '302':
           description: Redirect to a signed download URL
@@ -165,6 +248,19 @@ paths:
                 invalidPassword:
                   value:
                     error: invalid password
+        '400':
+          description: Invalid request body or missing file identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingFileID:
+                  value:
+                    error: file_id is required
+                invalidBody:
+                  value:
+                    error: invalid download request body
         '404':
           description: File metadata not found
           content:
@@ -197,24 +293,14 @@ paths:
         '200':
           description: Service is healthy
 components:
-  parameters:
-    FilePasswordHeader:
-      name: X-File-Password
-      in: header
-      required: false
-      description: Optional file password. Required for download only when the file is protected.
-      schema:
-        type: string
-        minLength: 1
-    FileExpiresAtHeader:
-      name: X-File-Expires-At
-      in: header
-      required: false
-      description: Optional RFC3339 timestamp after which the file is no longer downloadable.
-      schema:
-        type: string
-        format: date-time
   schemas:
+    DownloadPasswordRequest:
+      type: object
+      properties:
+        password:
+          type: string
+          minLength: 1
+          description: Password required to authorize download of a protected file.
     FileUploadResponse:
       type: object
       required:

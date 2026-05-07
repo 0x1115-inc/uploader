@@ -41,8 +41,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const filePasswordHeader = "X-File-Password"
-const fileExpiresAtHeader = "X-File-Expires-At"
+const uploadPasswordField = "password"
+const uploadExpiresAtField = "expires_at"
+const maxMultipartFieldBytes = 4 * 1024
 
 type Server struct {
 	cfg     Config
@@ -60,20 +61,21 @@ func (s *Server) Handler() http.Handler {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   s.cfg.CORSOrigins,
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions},
-		AllowedHeaders:   []string{"Accept", "Content-Type", filePasswordHeader, fileExpiresAtHeader},
+		AllowedHeaders:   []string{"Accept", "Content-Type"},
 		ExposedHeaders:   []string{"Content-Disposition", "Content-Type"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
 	r.Post("/v1/files", s.handleUpload)
 	r.Get("/v1/files/{file_id}/download", s.handleDownload)
+	r.Post("/v1/files/{file_id}/download", s.handleDownload)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	return r
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	password := r.Header.Get(filePasswordHeader)
-	expiresAtHeader := strings.TrimSpace(r.Header.Get(fileExpiresAtHeader))
+	password := ""
+	expiresAt := ""
 
 	maxBytes := s.cfg.MaxUploadMB * 1024 * 1024
 	// HTTP-layer hard cap for the full request (file + multipart overhead).
@@ -91,7 +93,24 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var filePart *multipart.Part
+	var (
+		filename    string
+		contentType string
+		sizeBytes   int64
+		objectKey   string
+		uploaded    bool
+	)
+	cleanupUploadedObject := func() {
+		if !uploaded {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := s.storage.Delete(cleanupCtx, objectKey); err != nil {
+			logx.Warnf("upload cleanup: storage delete failed object_key=%q err=%v", objectKey, err)
+		}
+	}
+
 	for {
 		part, err := mr.NextPart()
 		if errors.Is(err, io.EOF) {
@@ -107,75 +126,105 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid multipart form")
 			return
 		}
-		if part.FormName() == "file" {
-			filePart = part
-			break
+
+		switch part.FormName() {
+		case uploadPasswordField:
+			value, err := readMultipartFieldValue(part, maxMultipartFieldBytes)
+			_ = part.Close()
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			password = value
+		case uploadExpiresAtField:
+			value, err := readMultipartFieldValue(part, maxMultipartFieldBytes)
+			_ = part.Close()
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if value == "" {
+				expiresAt = ""
+				continue
+			}
+			expiresAt, err = parseAndValidateExpiration(value, nowUTC)
+			if err != nil {
+				cleanupUploadedObject()
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		case "file":
+			if uploaded {
+				_ = part.Close()
+				cleanupUploadedObject()
+				writeError(w, http.StatusBadRequest, "multiple file fields are not supported")
+				return
+			}
+
+			filename = sanitizeFilename(part.FileName())
+			if filename == "" {
+				_ = part.Close()
+				writeError(w, http.StatusBadRequest, "file name is required")
+				return
+			}
+
+			contentType = part.Header.Get("Content-Type")
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+
+			id := uuid.NewString()
+			now := nowUTC()
+			objectKey = path.Join("files", now.Format("2006"), now.Format("01"), id)
+
+			limitedFile := http.MaxBytesReader(w, part, maxBytes)
+			counting := &countingReader{r: limitedFile}
+			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+			_, err = s.storage.Put(ctx, objectKey, counting, -1, contentType)
+			cancel()
+			_ = limitedFile.Close()
+			_ = part.Close()
+			if err != nil {
+				if isTooLargeErr(err) {
+					logx.Warnf("upload rejected: too large filename=%q", filename)
+					writeError(w, http.StatusRequestEntityTooLarge, "file exceeds max size")
+					return
+				}
+				logx.Errorf("upload failed: storage put error object_key=%q err=%v", objectKey, err)
+				writeError(w, http.StatusInternalServerError, "upload failed")
+				return
+			}
+
+			sizeBytes = counting.n
+			uploaded = true
+		default:
+			_ = part.Close()
 		}
-		_ = part.Close()
 	}
-	if filePart == nil {
+	if !uploaded {
 		writeError(w, http.StatusBadRequest, "missing file field")
 		return
-	}
-	defer filePart.Close()
-	// Per-file cap while streaming the multipart part.
-	limitedFile := http.MaxBytesReader(w, filePart, maxBytes)
-	defer limitedFile.Close()
-
-	filename := sanitizeFilename(filePart.FileName())
-	if filename == "" {
-		writeError(w, http.StatusBadRequest, "file name is required")
-		return
-	}
-	contentType := filePart.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
 	}
 
 	passwordHash := ""
 	if strings.TrimSpace(password) != "" {
 		passwordHash, err = hashPassword(password)
 		if err != nil {
+			cleanupUploadedObject()
 			logx.Errorf("upload failed: password hash error: %v", err)
 			writeError(w, http.StatusInternalServerError, "failed to secure file")
 			return
 		}
 	}
 
-	expiresAt := ""
-	if expiresAtHeader != "" {
-		expiresAt, err = parseAndValidateExpiration(expiresAtHeader, nowUTC)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-
 	id := uuid.NewString()
 	now := nowUTC()
-	objectKey := path.Join("files", now.Format("2006"), now.Format("01"), id)
-
-	counting := &countingReader{r: limitedFile}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
-	defer cancel()
-
-	_, err = s.storage.Put(ctx, objectKey, counting, -1, contentType)
-	if err != nil {
-		if isTooLargeErr(err) {
-			logx.Warnf("upload rejected: too large file_id=%s filename=%q", id, filename)
-			writeError(w, http.StatusRequestEntityTooLarge, "file exceeds max size")
-			return
-		}
-		logx.Errorf("upload failed: storage put error file_id=%s object_key=%q err=%v", id, objectKey, err)
-		writeError(w, http.StatusInternalServerError, "upload failed")
-		return
-	}
 
 	record := model.FileRecord{
 		ID:           id,
 		Filename:     filename,
 		ContentType:  contentType,
-		SizeBytes:    counting.n,
+		SizeBytes:    sizeBytes,
 		Bucket:       s.cfg.S3Bucket,
 		ObjectKey:    objectKey,
 		PasswordHash: passwordHash,
@@ -183,6 +232,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    now.Format(time.RFC3339Nano),
 	}
 	if err := s.db.CreateFile(r.Context(), record); err != nil {
+		cleanupUploadedObject()
 		logx.Errorf("upload failed: db create error file_id=%s err=%v", id, err)
 		writeError(w, http.StatusInternalServerError, "failed to persist metadata")
 		return
@@ -206,7 +256,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "file_id is required")
 		return
 	}
-	password := r.Header.Get(filePasswordHeader)
+	password, err := readDownloadPassword(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	file, err := s.db.GetFile(r.Context(), id)
 	if err != nil {
@@ -247,6 +301,46 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", url)
 	w.WriteHeader(http.StatusFound)
+}
+
+func readDownloadPassword(r *http.Request) (string, error) {
+	if r.Method != http.MethodPost {
+		return "", nil
+	}
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		return "", nil
+	}
+
+	if strings.HasPrefix(contentType, "application/json") {
+		var payload struct {
+			Password string `json:"password"`
+		}
+		decoder := json.NewDecoder(io.LimitReader(r.Body, maxMultipartFieldBytes+1))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&payload); err != nil {
+			return "", errors.New("invalid download request body")
+		}
+		return strings.TrimSpace(payload.Password), nil
+	}
+
+	if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") {
+		r.Body = http.MaxBytesReader(nil, r.Body, maxMultipartFieldBytes)
+		if err := r.ParseForm(); err != nil {
+			return "", errors.New("invalid download request body")
+		}
+		return strings.TrimSpace(r.FormValue("password")), nil
+	}
+
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(maxMultipartFieldBytes); err != nil {
+			return "", errors.New("invalid download request body")
+		}
+		return strings.TrimSpace(r.FormValue("password")), nil
+	}
+
+	return "", errors.New("unsupported content type")
 }
 
 func (s *Server) cleanupExpiredFile(ctx context.Context, file model.FileRecord) {
@@ -306,6 +400,20 @@ func parseAndValidateExpiration(raw string, nowFn func() time.Time) (string, err
 	}
 
 	return expiresAt.Format(time.RFC3339Nano), nil
+}
+
+func readMultipartFieldValue(part *multipart.Part, maxBytes int64) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(part, maxBytes+1))
+	if err != nil {
+		if isTooLargeErr(err) {
+			return "", errors.New("multipart field exceeds max size")
+		}
+		return "", errors.New("invalid multipart form")
+	}
+	if int64(len(data)) > maxBytes {
+		return "", errors.New("multipart field exceeds max size")
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 func isExpired(expiresAt string) bool {

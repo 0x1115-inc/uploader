@@ -9,6 +9,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,10 +34,11 @@ func TestUploadWithoutPasswordAllowed(t *testing.T) {
 func TestDownloadRequiresMatchingPassword(t *testing.T) {
 	store := newStubStore()
 	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, &stubStorage{})
-	body, contentType := newMultipartUpload(t, "hello.txt", "hello world")
+	body, contentType := newMultipartUploadWithFields(t, "hello.txt", "hello world", false, map[string]string{
+		uploadPasswordField: "secret123",
+	})
 	uploadReq := httptest.NewRequest(http.MethodPost, "/v1/files", body)
 	uploadReq.Header.Set("Content-Type", contentType)
-	uploadReq.Header.Set(filePasswordHeader, "secret123")
 
 	uploadResp := httptest.NewRecorder()
 	server.Handler().ServeHTTP(uploadResp, uploadReq)
@@ -57,16 +60,16 @@ func TestDownloadRequiresMatchingPassword(t *testing.T) {
 		t.Fatalf("expected missing password status %d, got %d", http.StatusUnauthorized, missingPasswordResp.Code)
 	}
 
-	wrongPasswordReq := httptest.NewRequest(http.MethodGet, "/v1/files/"+created.FileID+"/download", nil)
-	wrongPasswordReq.Header.Set(filePasswordHeader, "wrong")
+	wrongPasswordReq := httptest.NewRequest(http.MethodPost, "/v1/files/"+created.FileID+"/download", strings.NewReader(`{"password":"wrong"}`))
+	wrongPasswordReq.Header.Set("Content-Type", "application/json")
 	wrongPasswordResp := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wrongPasswordResp, wrongPasswordReq)
 	if wrongPasswordResp.Code != http.StatusUnauthorized {
 		t.Fatalf("expected wrong password status %d, got %d", http.StatusUnauthorized, wrongPasswordResp.Code)
 	}
 
-	correctPasswordReq := httptest.NewRequest(http.MethodGet, "/v1/files/"+created.FileID+"/download", nil)
-	correctPasswordReq.Header.Set(filePasswordHeader, "secret123")
+	correctPasswordReq := httptest.NewRequest(http.MethodPost, "/v1/files/"+created.FileID+"/download", strings.NewReader(`{"password":"secret123"}`))
+	correctPasswordReq.Header.Set("Content-Type", "application/json")
 	correctPasswordResp := httptest.NewRecorder()
 	server.Handler().ServeHTTP(correctPasswordResp, correctPasswordReq)
 	if correctPasswordResp.Code != http.StatusFound {
@@ -82,6 +85,46 @@ func TestDownloadRequiresMatchingPassword(t *testing.T) {
 	}
 	if file.PasswordHash == "" || file.PasswordHash == "secret123" {
 		t.Fatalf("expected stored password hash, got %q", file.PasswordHash)
+	}
+}
+
+func TestDownloadAllowsPasswordViaFormBody(t *testing.T) {
+	store := newStubStore()
+	store.files["protected-file"] = model.FileRecord{
+		ID:           "protected-file",
+		ObjectKey:    "files/2026/05/protected-file",
+		PasswordHash: mustHashPassword(t, "secret123"),
+	}
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, &stubStorage{})
+	form := url.Values{}
+	form.Set("password", "secret123")
+	req := httptest.NewRequest(http.MethodPost, "/v1/files/protected-file/download", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusFound {
+		t.Fatalf("expected status %d, got %d", http.StatusFound, resp.Code)
+	}
+}
+
+func TestDownloadWithInvalidBodyRejected(t *testing.T) {
+	store := newStubStore()
+	store.files["protected-file"] = model.FileRecord{
+		ID:           "protected-file",
+		ObjectKey:    "files/2026/05/protected-file",
+		PasswordHash: mustHashPassword(t, "secret123"),
+	}
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, &stubStorage{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/files/protected-file/download", strings.NewReader(`{"password":`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, resp.Code)
 	}
 }
 
@@ -102,14 +145,15 @@ func TestDownloadWithoutStoredPasswordAllowsAccess(t *testing.T) {
 	}
 }
 
-func TestUploadWithExpirationHeader(t *testing.T) {
+func TestUploadWithExpirationField(t *testing.T) {
 	store := newStubStore()
 	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, &stubStorage{})
-	body, contentType := newMultipartUpload(t, "hello.txt", "hello world")
+	expiresAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	body, contentType := newMultipartUploadWithFields(t, "hello.txt", "hello world", false, map[string]string{
+		uploadExpiresAtField: expiresAt,
+	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", body)
 	req.Header.Set("Content-Type", contentType)
-	expiresAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
-	req.Header.Set(fileExpiresAtHeader, expiresAt)
 
 	resp := httptest.NewRecorder()
 	server.Handler().ServeHTTP(resp, req)
@@ -138,18 +182,56 @@ func TestUploadWithExpirationHeader(t *testing.T) {
 	}
 }
 
-func TestUploadWithInvalidExpirationHeaderRejected(t *testing.T) {
+func TestUploadWithInvalidExpirationFieldRejected(t *testing.T) {
 	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, newStubStore(), &stubStorage{})
-	body, contentType := newMultipartUpload(t, "hello.txt", "hello world")
+	body, contentType := newMultipartUploadWithFields(t, "hello.txt", "hello world", false, map[string]string{
+		uploadExpiresAtField: "not-a-timestamp",
+	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", body)
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set(fileExpiresAtHeader, "not-a-timestamp")
 
 	resp := httptest.NewRecorder()
 	server.Handler().ServeHTTP(resp, req)
 
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, resp.Code)
+	}
+}
+
+func TestUploadAcceptsMetadataFieldsAfterFile(t *testing.T) {
+	store := newStubStore()
+	server := NewServer(Config{MaxUploadMB: 5, S3Bucket: "uploads"}, store, &stubStorage{})
+	expiresAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	body, contentType := newMultipartUploadWithFields(t, "hello.txt", "hello world", true, map[string]string{
+		uploadPasswordField:  "secret123",
+		uploadExpiresAtField: expiresAt,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/files", body)
+	req.Header.Set("Content-Type", contentType)
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, resp.Code, resp.Body.String())
+	}
+
+	var created struct {
+		FileID string `json:"file_id"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal upload response: %v", err)
+	}
+
+	rec, err := store.GetFile(context.Background(), created.FileID)
+	if err != nil {
+		t.Fatalf("get stored file: %v", err)
+	}
+	if rec.PasswordHash == "" {
+		t.Fatal("expected password hash to be persisted")
+	}
+	if rec.ExpiresAt == "" {
+		t.Fatal("expected expires_at to be persisted")
 	}
 }
 
@@ -181,19 +263,49 @@ func TestDownloadExpiredFileReturnsNotFoundAndCleansUp(t *testing.T) {
 
 func newMultipartUpload(t *testing.T, filename, content string) (*bytes.Buffer, string) {
 	t.Helper()
+	return newMultipartUploadWithFields(t, filename, content, false, nil)
+}
+
+func newMultipartUploadWithFields(t *testing.T, filename, content string, fieldsAfterFile bool, fields map[string]string) (*bytes.Buffer, string) {
+	t.Helper()
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("file", filename)
-	if err != nil {
-		t.Fatalf("create form file: %v", err)
+	writeFields := func() {
+		for key, value := range fields {
+			if err := writer.WriteField(key, value); err != nil {
+				t.Fatalf("write field %s: %v", key, err)
+			}
+		}
 	}
-	if _, err := io.WriteString(part, content); err != nil {
-		t.Fatalf("write file content: %v", err)
+	writeFile := func() {
+		part, err := writer.CreateFormFile("file", filename)
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := io.WriteString(part, content); err != nil {
+			t.Fatalf("write file content: %v", err)
+		}
+	}
+	if !fieldsAfterFile {
+		writeFields()
+	}
+	writeFile()
+	if fieldsAfterFile {
+		writeFields()
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close multipart writer: %v", err)
 	}
 	return body, writer.FormDataContentType()
+}
+
+func mustHashPassword(t *testing.T, password string) string {
+	t.Helper()
+	hash, err := hashPassword(password)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	return hash
 }
 
 type stubStore struct {
