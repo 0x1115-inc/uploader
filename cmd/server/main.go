@@ -59,7 +59,7 @@ func main() {
 	}
 
 	srv := httpapi.NewServer(
-		httpapi.Config{MaxUploadMB: cfg.MaxUploadMB, S3Bucket: cfg.S3Bucket},
+		httpapi.Config{MaxUploadMB: cfg.MaxUploadMB, S3Bucket: cfg.S3Bucket, CORSOrigins: cfg.CORSOrigins},
 		dbStore,
 		storageClient,
 	)

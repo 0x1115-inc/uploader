@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package httpapi
 
 type Config struct {
-	MaxUploadMB int64
-	S3Bucket    string
+	MaxUploadMB    int64
+	S3Bucket       string
+	CORSOrigins    []string
 }

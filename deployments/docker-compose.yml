@@ -30,7 +30,9 @@ services:
       - app-network
 
   uploader:
-    build: .
+    build: 
+      context: ./
+      dockerfile: build/Dockerfile
     environment:
       PORT: "8080"
       DB_PATH: "/data/uploader.db"

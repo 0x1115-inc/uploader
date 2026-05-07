@@ -21,6 +21,7 @@ package main
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -36,6 +37,8 @@ type Config struct {
 	S3Bucket    string
 	S3Region    string
 	S3UseSSL    bool
+
+	CORSOrigins []string
 }
 
 func loadConfig() Config {
@@ -52,6 +55,8 @@ func loadConfig() Config {
 		S3Bucket:    getEnv("S3_BUCKET", "uploads"),
 		S3Region:    getEnv("S3_REGION", ""),
 		S3UseSSL:    getEnvBool("S3_USE_SSL", false),
+
+		CORSOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", []string{"*"}),
 	}
 }
 
@@ -75,6 +80,22 @@ func getEnvBool(key string, def bool) bool {
 	if v := os.Getenv(key); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
+		}
+	}
+	return def
+}
+
+func getEnvStringSlice(key string, def []string) []string {
+	if v := os.Getenv(key); v != "" {
+		parts := strings.Split(v, ",")
+		result := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		if len(result) > 0 {
+			return result
 		}
 	}
 	return def

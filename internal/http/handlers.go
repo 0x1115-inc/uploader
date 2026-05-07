@@ -36,6 +36,7 @@ import (
 	"uploader/internal/storage"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/cors"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -56,6 +57,14 @@ func NewServer(cfg Config, dbConn db.Store, storageClient storage.Provider) *Ser
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(requestLogger)
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   s.cfg.CORSOrigins,
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions},
+		AllowedHeaders:   []string{"Accept", "Content-Type", filePasswordHeader, fileExpiresAtHeader},
+		ExposedHeaders:   []string{"Content-Disposition", "Content-Type"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
 	r.Post("/v1/files", s.handleUpload)
 	r.Get("/v1/files/{file_id}/download", s.handleDownload)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
