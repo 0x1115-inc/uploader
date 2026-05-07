@@ -48,6 +48,9 @@ S3_SECRET_KEY=minioadmin
 S3_BUCKET=uploads
 S3_REGION=
 S3_USE_SSL=false
+
+# Comma-separated list of allowed CORS origins. Use * to allow all origins.
+CORS_ALLOWED_ORIGINS=*
 ```
 
 ## Examples
