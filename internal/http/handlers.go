@@ -27,6 +27,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 		MaxAge:           300,
 	}))
 	r.Post("/v1/files", s.handleUpload)
+	r.Get("/v1/files", s.handleListFiles)
 	r.Get("/v1/files/{file_id}/download", s.handleDownload)
 	r.Post("/v1/files/{file_id}/download", s.handleDownload)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -343,6 +345,46 @@ func readDownloadPassword(r *http.Request) (string, error) {
 	return "", errors.New("unsupported content type")
 }
 
+func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	offset := 0
+
+	// Parse query parameters
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := parsePositiveInt(limitStr, 50); err == nil {
+			limit = l
+		}
+	}
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if o, err := parseNonNegativeInt(offsetStr, 0); err == nil {
+			offset = o
+		}
+	}
+
+	// Enforce reasonable limits
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	files, err := s.db.ListFiles(r.Context(), limit, offset)
+	if err != nil {
+		logx.Errorf("list files failed: db list error err=%v", err)
+		writeError(w, http.StatusInternalServerError, "failed to list files")
+		return
+	}
+
+	if files == nil {
+		files = make([]model.FileRecord, 0)
+	}
+
+	resp := map[string]any{
+		"files":  files,
+		"limit":  limit,
+		"offset": offset,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) cleanupExpiredFile(ctx context.Context, file model.FileRecord) {
 	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -442,6 +484,34 @@ func (c *countingReader) Read(p []byte) (int, error) {
 		c.n += int64(n)
 	}
 	return n, err
+}
+
+func parsePositiveInt(s string, defaultVal int) (int, error) {
+	if s == "" {
+		return defaultVal, nil
+	}
+	val, err := parseNonNegativeInt(s, defaultVal)
+	if err != nil {
+		return defaultVal, err
+	}
+	if val <= 0 {
+		return defaultVal, errors.New("value must be positive")
+	}
+	return val, nil
+}
+
+func parseNonNegativeInt(s string, defaultVal int) (int, error) {
+	if s == "" {
+		return defaultVal, nil
+	}
+	val, err := strconv.Atoi(s)
+	if err != nil {
+		return defaultVal, err
+	}
+	if val < 0 {
+		return defaultVal, errors.New("value must be non-negative")
+	}
+	return val, nil
 }
 
 func isTooLargeErr(err error) bool {
