@@ -197,7 +197,7 @@ paths:
         and send the password in the request body.
 
         The signed URL currently has a 60-second time-to-live.
-      operationId: downloadFile
+      operationId: downloadFileGet
       parameters:
         - name: file_id
           in: path
@@ -264,7 +264,7 @@ paths:
         For files uploaded without a password, no password is required.
 
         The signed URL currently has a 60-second time-to-live.
-      operationId: downloadFile
+      operationId: downloadFilePost
       parameters:
         - name: file_id
           in: path
@@ -294,13 +294,18 @@ paths:
                 type: string
                 format: uri
         '400':
-          description: Missing file identifier
+          description: Invalid request body or missing file identifier
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-              example:
-                error: file_id is required
+              examples:
+                missingFileID:
+                  value:
+                    error: file_id is required
+                invalidBody:
+                  value:
+                    error: invalid download request body
         '401':
           description: Password missing or invalid for a protected file
           content:
@@ -314,19 +319,6 @@ paths:
                 invalidPassword:
                   value:
                     error: invalid password
-        '400':
-          description: Invalid request body or missing file identifier
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-              examples:
-                missingFileID:
-                  value:
-                    error: file_id is required
-                invalidBody:
-                  value:
-                    error: invalid download request body
         '404':
           description: File metadata not found
           content:

@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.1] - May 21, 2026
+
+### Changed
+- Cleaned up OpenAPI operation IDs for download endpoints to avoid duplicates:
+  - `GET /v1/files/{file_id}/download` -> `downloadFileGet`
+  - `POST /v1/files/{file_id}/download` -> `downloadFilePost`
+- Consolidated duplicated `400` response definitions for `POST /v1/files/{file_id}/download` into a single response with explicit examples for:
+  - missing file id
+  - invalid download request body
+
 ## [1.2.0] - May 20, 2026
 
 ### Added
