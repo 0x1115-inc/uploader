@@ -35,8 +35,11 @@ import (
 
 func main() {
 	cfg := loadConfig()
+	applicationVersion := "1.3.0"
+	
 	logx.SetLevelFromString(cfg.LogLevel)
 	logx.Infof("log level set to %s", cfg.LogLevel)
+	logx.Infof("starting uploader version %s", applicationVersion)
 
 	dbStore, closeDB, err := newDBStore(cfg)
 	if err != nil {

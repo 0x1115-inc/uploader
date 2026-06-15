@@ -34,8 +34,10 @@ type Store interface {
 	CreateFile(ctx context.Context, f model.FileRecord) error
 	GetFile(ctx context.Context, id string) (model.FileRecord, error)
 	ListFiles(ctx context.Context, limit, offset int) ([]model.FileRecord, error)
+	ListFilesByOwner(ctx context.Context, ownerID string, limit, offset int) ([]model.FileRecord, error)
 	UpdateFile(ctx context.Context, f model.FileRecord) error
 	DeleteFile(ctx context.Context, id string) error
+	IncrementDownloadCount(ctx context.Context, id string) error
 }
 
 type SQLiteStore struct {
@@ -81,32 +83,38 @@ CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at DESC);
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE files ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''`)
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
+	// Idempotent column additions — SQLite returns a "duplicate column" error when
+	// the column already exists, which we treat as a no-op.
+	for _, stmt := range []string{
+		`ALTER TABLE files ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE files ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE files ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE files ADD COLUMN download_count INTEGER NOT NULL DEFAULT 0`,
+	} {
+		_, err = s.db.ExecContext(ctx, stmt)
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE files ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`)
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
-	}
-	return nil
+	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_files_owner_id ON files(owner_id, created_at DESC)`)
+	return err
 }
 
 func (s *SQLiteStore) CreateFile(ctx context.Context, f model.FileRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO files (id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, f.ID, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.PasswordHash, f.ExpiresAt, f.CreatedAt)
+INSERT INTO files (id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at, owner_id, download_count)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, f.ID, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.PasswordHash, f.ExpiresAt, f.CreatedAt, f.OwnerID, f.DownloadCount)
 	return err
 }
 
 func (s *SQLiteStore) GetFile(ctx context.Context, id string) (model.FileRecord, error) {
 	var f model.FileRecord
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at, owner_id, download_count
 FROM files
 WHERE id = ?
-`, id).Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt)
+`, id).Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt, &f.OwnerID, &f.DownloadCount)
 	if err != nil {
 		return model.FileRecord{}, err
 	}
@@ -122,7 +130,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, limit, offset int) ([]model
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at, owner_id, download_count
 FROM files
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?
@@ -135,7 +143,41 @@ LIMIT ? OFFSET ?
 	files := make([]model.FileRecord, 0, limit)
 	for rows.Next() {
 		var f model.FileRecord
-		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt, &f.OwnerID, &f.DownloadCount); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func (s *SQLiteStore) ListFilesByOwner(ctx context.Context, ownerID string, limit, offset int) ([]model.FileRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at, owner_id, download_count
+FROM files
+WHERE owner_id = ?
+ORDER BY created_at DESC
+LIMIT ? OFFSET ?
+`, ownerID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	files := make([]model.FileRecord, 0, limit)
+	for rows.Next() {
+		var f model.FileRecord
+		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt, &f.OwnerID, &f.DownloadCount); err != nil {
 			return nil, err
 		}
 		files = append(files, f)
@@ -178,6 +220,11 @@ func (s *SQLiteStore) DeleteFile(ctx context.Context, id string) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (s *SQLiteStore) IncrementDownloadCount(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE files SET download_count = download_count + 1 WHERE id = ?`, id)
+	return err
 }
 
 var _ Store = (*SQLiteStore)(nil)

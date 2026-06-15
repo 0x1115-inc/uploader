@@ -66,28 +66,36 @@ CREATE TABLE IF NOT EXISTS files (
 	expires_at TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at DESC);
 ALTER TABLE files ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT '';
 ALTER TABLE files ADD COLUMN IF NOT EXISTS expires_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE files ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE files ADD COLUMN IF NOT EXISTS download_count BIGINT NOT NULL DEFAULT 0;
+`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_files_owner_id ON files(owner_id, created_at DESC);
 `)
 	return err
 }
 
 func (s *PostgresStore) CreateFile(ctx context.Context, f model.FileRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO files (id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-`, f.ID, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.PasswordHash, f.ExpiresAt, f.CreatedAt)
+INSERT INTO files (id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at, owner_id, download_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+`, f.ID, f.Filename, f.ContentType, f.SizeBytes, f.Bucket, f.ObjectKey, f.PasswordHash, f.ExpiresAt, f.CreatedAt, f.OwnerID, f.DownloadCount)
 	return err
 }
 
 func (s *PostgresStore) GetFile(ctx context.Context, id string) (model.FileRecord, error) {
 	var f model.FileRecord
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at, owner_id, download_count
 FROM files
 WHERE id = $1
-`, id).Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt)
+`, id).Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt, &f.OwnerID, &f.DownloadCount)
 	if err != nil {
 		return model.FileRecord{}, err
 	}
@@ -103,7 +111,7 @@ func (s *PostgresStore) ListFiles(ctx context.Context, limit, offset int) ([]mod
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at, owner_id, download_count
 FROM files
 ORDER BY created_at DESC
 LIMIT $1 OFFSET $2
@@ -116,7 +124,41 @@ LIMIT $1 OFFSET $2
 	files := make([]model.FileRecord, 0, limit)
 	for rows.Next() {
 		var f model.FileRecord
-		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt, &f.OwnerID, &f.DownloadCount); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func (s *PostgresStore) ListFilesByOwner(ctx context.Context, ownerID string, limit, offset int) ([]model.FileRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, filename, content_type, size_bytes, bucket, object_key, password_hash, expires_at, created_at, owner_id, download_count
+FROM files
+WHERE owner_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`, ownerID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	files := make([]model.FileRecord, 0, limit)
+	for rows.Next() {
+		var f model.FileRecord
+		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.SizeBytes, &f.Bucket, &f.ObjectKey, &f.PasswordHash, &f.ExpiresAt, &f.CreatedAt, &f.OwnerID, &f.DownloadCount); err != nil {
 			return nil, err
 		}
 		files = append(files, f)
@@ -159,6 +201,11 @@ func (s *PostgresStore) DeleteFile(ctx context.Context, id string) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (s *PostgresStore) IncrementDownloadCount(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE files SET download_count = download_count + 1 WHERE id = $1`, id)
+	return err
 }
 
 var _ Store = (*PostgresStore)(nil)

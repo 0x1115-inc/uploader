@@ -333,12 +333,30 @@ func (s *stubStore) ListFiles(_ context.Context, _, _ int) ([]model.FileRecord, 
 	return nil, nil
 }
 
+func (s *stubStore) ListFilesByOwner(_ context.Context, ownerID string, _, _ int) ([]model.FileRecord, error) {
+	var out []model.FileRecord
+	for _, f := range s.files {
+		if f.OwnerID == ownerID {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
 func (s *stubStore) UpdateFile(_ context.Context, _ model.FileRecord) error {
 	return nil
 }
 
 func (s *stubStore) DeleteFile(_ context.Context, id string) error {
 	delete(s.files, id)
+	return nil
+}
+
+func (s *stubStore) IncrementDownloadCount(_ context.Context, id string) error {
+	if f, ok := s.files[id]; ok {
+		f.DownloadCount++
+		s.files[id] = f
+	}
 	return nil
 }
 

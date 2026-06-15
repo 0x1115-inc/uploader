@@ -61,17 +61,30 @@ func (s *Server) Handler() http.Handler {
 	r.Use(requestLogger)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   s.cfg.CORSOrigins,
-		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions},
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions},
 		AllowedHeaders:   []string{"Accept", "Content-Type"},
 		ExposedHeaders:   []string{"Content-Disposition", "Content-Type"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
+
+	// Public routes — no authentication required.
 	r.Post("/v1/files", s.handleUpload)
 	r.Get("/v1/files", s.handleListFiles)
 	r.Get("/v1/files/{file_id}/download", s.handleDownload)
 	r.Post("/v1/files/{file_id}/download", s.handleDownload)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Protected routes — requireAuth validates X-Auth-Email injected by oauth2-proxy.
+	// These paths must be routed exclusively through the oauth2-proxy reverse proxy;
+	// direct access bypassing the proxy would allow header spoofing.
+	r.Group(func(r chi.Router) {
+		r.Use(s.requireAuth)
+		r.Get("/v1/user/files", s.handleUserListFiles)
+		r.Delete("/v1/user/files/{file_id}", s.handleUserDeleteFile)
+		r.Get("/v1/user/files/{file_id}/stats", s.handleUserFileStats)
+	})
+
 	return r
 }
 
@@ -222,6 +235,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	id := uuid.NewString()
 	now := nowUTC()
 
+	// Tag the upload with the authenticated user's email when available.
+	// Requests without a valid X-Auth-Email header are treated as guest uploads
+	// (owner_id remains empty) and will not appear in user-scoped listings.
+	ownerID := ""
+	if email := strings.TrimSpace(r.Header.Get("X-Auth-Email")); isValidAuthEmail(email) {
+		ownerID = email
+	}
+
 	record := model.FileRecord{
 		ID:           id,
 		Filename:     filename,
@@ -232,6 +253,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		PasswordHash: passwordHash,
 		ExpiresAt:    expiresAt,
 		CreatedAt:    now.Format(time.RFC3339Nano),
+		OwnerID:      ownerID,
 	}
 	if err := s.db.CreateFile(r.Context(), record); err != nil {
 		cleanupUploadedObject()
@@ -299,6 +321,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		logx.Errorf("download failed: sign url error file_id=%s object_key=%q err=%v", id, file.ObjectKey, err)
 		writeError(w, http.StatusInternalServerError, "failed to sign url")
 		return
+	}
+
+	// Increment download counter best-effort; failure does not block the redirect.
+	if err := s.db.IncrementDownloadCount(r.Context(), id); err != nil {
+		logx.Warnf("download count increment failed: file_id=%s err=%v", id, err)
 	}
 
 	w.Header().Set("Location", url)

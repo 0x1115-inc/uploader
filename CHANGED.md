@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.3.0] - Jun 15, 2026
+
+### Added
+- Authenticated user file management endpoints protected by oauth2-proxy identity header (`X-Auth-Email`):
+  - `GET /v1/user/files`
+  - `GET /v1/user/files/{file_id}/stats`
+  - `DELETE /v1/user/files/{file_id}`
+- Download statistics tracking via `download_count` metadata field, incremented for each successful download redirect (`302`).
+- Ownership attribution for authenticated uploads via `owner_id` metadata field.
+
+### Changed
+- Public upload endpoint (`POST /v1/files`) now automatically attributes uploads to a user when a valid `X-Auth-Email` header is present; uploads without identity continue to be treated as guest uploads.
+- CORS method list now includes `DELETE` to support authenticated file deletion from browser clients.
+- OpenAPI specification updated to version `1.3.0` with:
+  - authenticated `/v1/user/*` endpoints
+  - user-facing response schemas (`UserFileView`, `UserFileListResponse`)
+  - `oauth2Proxy` security scheme documentation
+
+### Security
+- Documented trust boundary for `X-Auth-Email`: this header must only be accepted from traffic routed through oauth2-proxy.
+- User-scoped endpoints intentionally return `404` for both missing files and non-owned files to reduce IDOR information disclosure.
+- User-facing responses omit sensitive internal fields such as `password_hash`, `object_key`, `bucket`, and `owner_id`.
+
+### Migration Notes
+- Startup migrations are automatic for both SQLite and Postgres.
+- New columns added to `files` table:
+  - `owner_id` (default empty string)
+  - `download_count` (default 0)
+- Existing records remain valid and are treated as guest uploads unless subsequently re-uploaded under authenticated identity.
+
 ## [1.2.1] - May 21, 2026
 
 ### Changed

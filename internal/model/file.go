@@ -19,13 +19,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package model
 
 type FileRecord struct {
-	ID           string
-	Filename     string
-	ContentType  string
-	SizeBytes    int64
-	Bucket       string
-	ObjectKey    string
-	PasswordHash string
-	ExpiresAt    string
-	CreatedAt    string
+	ID            string
+	Filename      string
+	ContentType   string
+	SizeBytes     int64
+	Bucket        string
+	ObjectKey     string
+	PasswordHash  string
+	ExpiresAt     string
+	CreatedAt     string
+	OwnerID       string // email injected by oauth2-proxy; empty for guest uploads
+	DownloadCount int64  // incremented on each successful download redirect
 }

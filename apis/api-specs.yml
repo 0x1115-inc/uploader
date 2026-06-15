@@ -1,18 +1,24 @@
 openapi: 3.0.3
 info:
   title: Uploader API
-  version: 1.2.1
+  version: 1.3.0
   description: |
     OpenAPI specification for the uploader service.
 
     The service accepts multipart file uploads, stores file metadata,
     and returns a short-lived signed download redirect.
+
+    User-scoped endpoints (/v1/user/*) require authentication via oauth2-proxy.
+    The proxy validates user sessions and injects X-Auth-Email into upstream
+    requests sent to this service.
 servers:
   - url: http://localhost:8080
     description: Local development server
 tags:
   - name: Files
-    description: File upload and download operations
+    description: Public file upload and download operations
+  - name: User
+    description: Authenticated user file management operations
   - name: Health
     description: Service health endpoint
 paths:
@@ -340,6 +346,179 @@ paths:
                 signFailed:
                   value:
                     error: failed to sign url
+  /v1/user/files:
+    get:
+      tags:
+        - User
+      summary: List authenticated user's files
+      description: |
+        Returns a paginated list of files owned by the authenticated user.
+
+        Identity is resolved from the X-Auth-Email header injected by
+        oauth2-proxy. Guest uploads (without owner identity) are excluded.
+      operationId: listUserFiles
+      security:
+        - oauth2Proxy: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of files to return. Default 50, maximum 100.
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          required: false
+          description: Number of files to skip for pagination. Default 0.
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Files retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserFileListResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: authentication required
+        '500':
+          description: Failed to retrieve file list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: failed to list files
+  /v1/user/files/{file_id}:
+    delete:
+      tags:
+        - User
+      summary: Delete an owned file
+      description: |
+        Deletes a file only when the authenticated user's identity matches
+        the file owner.
+
+        Returns 404 both for missing files and files belonging to other users
+        to reduce information disclosure risks.
+      operationId: deleteUserFile
+      security:
+        - oauth2Proxy: []
+      parameters:
+        - name: file_id
+          in: path
+          required: true
+          description: Unique file identifier returned by the upload endpoint.
+          schema:
+            type: string
+      responses:
+        '204':
+          description: File deleted successfully
+        '400':
+          description: Missing file identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file_id is required
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: authentication required
+        '404':
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file not found
+        '500':
+          description: File deletion failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                storageDeleteFailed:
+                  value:
+                    error: failed to delete file
+                metadataDeleteFailed:
+                  value:
+                    error: failed to delete file metadata
+  /v1/user/files/{file_id}/stats:
+    get:
+      tags:
+        - User
+      summary: Get stats for an owned file
+      description: |
+        Returns metadata and download statistics for a single owned file.
+
+        Returns 404 for files that do not exist or are owned by another user.
+      operationId: getUserFileStats
+      security:
+        - oauth2Proxy: []
+      parameters:
+        - name: file_id
+          in: path
+          required: true
+          description: Unique file identifier returned by the upload endpoint.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: File stats retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserFileView'
+        '400':
+          description: Missing file identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file_id is required
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: authentication required
+        '404':
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: file not found
+        '500':
+          description: Metadata lookup failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: failed to fetch file
   /healthz:
     get:
       tags:
@@ -443,6 +622,73 @@ components:
           type: integer
           description: The offset parameter used in the request.
           example: 0
+    UserFileView:
+      type: object
+      required:
+        - file_id
+        - filename
+        - content_type
+        - size_bytes
+        - download_count
+        - has_password
+        - created_at
+      properties:
+        file_id:
+          type: string
+          description: Unique file identifier.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        filename:
+          type: string
+          description: Sanitized original file name.
+          example: document.pdf
+        content_type:
+          type: string
+          description: Media type of the file.
+          example: application/pdf
+        size_bytes:
+          type: integer
+          format: int64
+          description: File size in bytes.
+          example: 24576
+        download_count:
+          type: integer
+          format: int64
+          description: Number of successful download redirects issued for this file.
+          example: 12
+        has_password:
+          type: boolean
+          description: Whether this file requires a password for download.
+          example: false
+        expires_at:
+          type: string
+          format: date-time
+          description: Optional expiration timestamp in RFC3339 format.
+          example: 2026-05-21T10:30:00Z
+        created_at:
+          type: string
+          format: date-time
+          description: Timestamp when the file was uploaded in RFC3339 format.
+          example: 2026-05-20T10:00:00Z
+    UserFileListResponse:
+      type: object
+      required:
+        - files
+        - limit
+        - offset
+      properties:
+        files:
+          type: array
+          description: List of owned file records.
+          items:
+            $ref: '#/components/schemas/UserFileView'
+        limit:
+          type: integer
+          description: The limit parameter used in the request.
+          example: 50
+        offset:
+          type: integer
+          description: The offset parameter used in the request.
+          example: 0
     ErrorResponse:
       type: object
       required:
@@ -452,3 +698,12 @@ components:
           type: string
           description: Human-readable error message.
           example: invalid multipart form
+  securitySchemes:
+    oauth2Proxy:
+      type: apiKey
+      in: header
+      name: X-Auth-Email
+      description: |
+        Identity header injected by oauth2-proxy after successful user
+        authentication. This header is trusted only when requests are routed
+        through the proxy.
